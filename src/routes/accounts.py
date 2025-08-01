@@ -131,7 +131,7 @@ async def reset_password_complete(
             raise HTTPException(status_code=400, detail="Invalid email or token.")
         result = await db.execute(
             select(PasswordResetTokenModel)
-            .where(user.email == db_user.email)
+            .where(PasswordResetTokenModel.user == db_user)
         )
         token = result.scalar_one_or_none()
         if not token:
@@ -143,7 +143,7 @@ async def reset_password_complete(
             await db.commit()
             raise HTTPException(status_code=400, detail="Invalid email or token.")
 
-        db_user._hashed_password = hash_password(user.password) # type: ignore
+        db_user._hashed_password = await run_in_threadpool(hash_password, user.password)
         await db.delete(token)
         await db.commit()
         return {"message": "Password reset successfully."}
@@ -196,7 +196,7 @@ async def login(
 @router.post("/refresh/", response_model=TokenRefreshResponseSchema)
 async def access_token_refresh(
     user: TokenRefreshRequestSchema,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     jwt_manager: JWTAuthManagerInterface = Depends(get_jwt_auth_manager),
 ):
     try:

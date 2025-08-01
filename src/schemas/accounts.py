@@ -45,7 +45,7 @@ class PasswordResetRequestSchema(BaseModel):
 class PasswordResetCompleteRequestSchema(BaseModel):
     email: EmailStr
     token: str
-    password: Optional[str]
+    password: str
 
 
 class UserLoginResponseSchema(BaseModel):
