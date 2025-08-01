@@ -3,10 +3,13 @@ from typing import cast
 
 from fastapi import APIRouter, Depends, status, HTTPException
 from fastapi.security import OAuth2PasswordBearer
+from exceptions.security import InvalidTokenError, TokenExpiredError
 from schemas.accounts import (
     MessageResponseSchema,
     PasswordResetCompleteRequestSchema,
     PasswordResetRequestSchema,
+    TokenRefreshRequestSchema,
+    TokenRefreshResponseSchema,
     UserLoginRequestSchema,
     UserLoginResponseSchema,
     UserRegistrationRequestSchema,
@@ -39,6 +42,8 @@ router = APIRouter()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
+
 async def get_user_by_email(db: AsyncSession, email: str):
     """Returns user by email"""
     result = await db.execute(select(UserModel).where(UserModel.email == email))
@@ -57,7 +62,7 @@ async def register(
         hashed = await run_in_threadpool(hash_password, user.password)
         db_user = UserModel(
             email=user.email,
-            hashed_password=hashed,
+            _hashed_password=hashed,
             group=UserGroupEnum.USER
         )
         db.add(db_user)
@@ -150,12 +155,67 @@ async def login(
     settings: BaseAppSettings = Depends(get_settings)
 ):
     db_user = await get_user_by_email(db, user.email)
-    if not db_user or not verify_password(user.password, db_user.hashed_password):
+    if not db_user or not verify_password(user.password, db_user._hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if db_user.is_active == False:
         raise HTTPException(status_code=403, detail="User account is not activated.")
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    refresh_token_expires = timedelta(days=settings.LOGIN_TIME_DAYS)
     access_token = jwt_manager.create_access_token(
-        data={"sub": db_user.email}, expires_delta=access_token_expires
+        data={"sub": db_user.email, "user_id": db_user.id}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    refresh_token = jwt_manager.create_refresh_token(
+        data={"sub": db_user.email, "user_id": db_user.id}, expires_delta=refresh_token_expires
+    )
+    await db.execute(
+        delete(RefreshTokenModel)
+        .where(RefreshTokenModel.user == db_user)
+    )
+    db_refresh_token = RefreshTokenModel.create(
+        user_id=db_user.id,
+        days_valid=settings.LOGIN_TIME_DAYS,
+        token=refresh_token
+    )
+    db.add(db_refresh_token)
+    await db.commit()
+    return {
+        "access_token": access_token,
+        "access_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+
+@router.post("/api/v1/accounts/refresh/", response_model=TokenRefreshResponseSchema)
+async def access_token_refresh(
+    user: TokenRefreshRequestSchema,
+    db: Session = Depends(get_db),
+    jwt_manager: JWTAuthManagerInterface = Depends(get_jwt_auth_manager),
+):
+    try:
+        payload = jwt_manager.decode_refresh_token(user.refresh_token)
+        user_id = payload.get("user_id")
+    except TokenExpiredError:
+        raise HTTPException(status_code=400, detail="Token has expired.")
+    except InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Token has expired.")
+    result_token = await db.execute(
+        select(RefreshTokenModel)
+        .where(RefreshTokenModel.token == user.refresh_token)
+    )
+    db_token = result_token.scalar_one_or_none()
+    if not db_token:
+        raise HTTPException(status_code=401, detail="Refresh token not found.")
+    result = await db.execute(
+        select(RefreshTokenModel)
+        .where(RefreshTokenModel.user_id == user_id)
+    )
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(status_code=401, detail="User not found.")
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    new_access_token = jwt_manager.create_access_token(
+        data={"sub": db_user.email, "user_id": db_user.id}, expires_delta=access_token_expires
+    )
+
+    return {"access_token": new_access_token}
