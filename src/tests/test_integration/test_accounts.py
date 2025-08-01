@@ -991,4 +991,5 @@ async def test_refresh_access_token_user_not_found(client, db_session, jwt_manag
     refresh_response = await client.post("/api/v1/accounts/refresh/", json=refresh_payload)
 
     assert refresh_response.status_code == 404, "Expected status code 404 for non-existent user."
+    print(f"user: {user}")
     assert refresh_response.json()["detail"] == "User not found.", "Unexpected error message."
